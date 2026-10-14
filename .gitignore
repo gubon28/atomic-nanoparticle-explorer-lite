@@ -1,0 +1,34 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+dist-ssr/
+*.local
+
+# Python caches (the validation tools in tools/ are Python)
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# test / tool caches
+.vite/
+coverage/
+*.tsbuildinfo
+
+# secrets (never commit these)
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+.npmrc
+
+# editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

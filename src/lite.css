@@ -37,7 +37,8 @@ body {
 .app {
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden; /* the shell never scrolls; panels scroll internally */
 }
 
 /* ---------------- header ---------------- */
@@ -49,6 +50,7 @@ body {
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, #101a26 0%, #0c131c 100%);
+  flex: 0 0 auto;
 }
 
 .brand {
@@ -100,23 +102,9 @@ body {
   grid-template-columns: 320px minmax(0, 1fr) 340px;
   gap: 12px;
   padding: 12px;
-  align-items: start;
-  flex: 1;
-}
-
-@media (max-width: 1400px) {
-  .grid {
-    grid-template-columns: 300px minmax(0, 1fr);
-  }
-  .right {
-    grid-column: 1 / -1;
-  }
-}
-
-@media (max-width: 900px) {
-  .grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0; /* lets the grid shrink and keeps the viewer inside the viewport */
 }
 
 .sidebar,
@@ -125,12 +113,51 @@ body {
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
 }
 
 .center {
   min-width: 0;
-  min-height: 620px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   position: relative;
+}
+
+@media (max-width: 1280px) {
+  .grid {
+    grid-template-columns: 300px minmax(0, 1fr);
+    grid-template-rows: minmax(340px, 1fr) minmax(0, auto);
+    overflow-y: auto;
+  }
+  .right {
+    grid-column: 1 / -1;
+    max-height: 44vh;
+    overflow-y: auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    align-items: start;
+  }
+}
+
+@media (max-width: 900px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+  }
+  .center {
+    order: -1; /* the viewer stays on top when everything stacks */
+    height: min(52vh, 460px);
+    min-height: 300px;
+  }
+  .sidebar {
+    max-height: none;
+    overflow: visible;
+  }
 }
 
 /* ---------------- panels ---------------- */
@@ -328,12 +355,12 @@ body {
 .viewer {
   position: relative;
   width: 100%;
-  height: 100%;
-  min-height: 620px;
+  flex: 1 1 auto;
+  min-height: 0; /* the absolute-positioned canvas fills whatever is left */
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
-  background: #0a0e14;
+  background: radial-gradient(circle at 50% 35%, #16202e 0%, #0a0e14 72%);
 }
 
 .viewer-toolbar {
@@ -573,4 +600,5 @@ body {
   font-size: 11px;
   color: var(--muted);
   line-height: 1.45;
+  flex: 0 0 auto;
 }

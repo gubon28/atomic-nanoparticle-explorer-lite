@@ -144,21 +144,8 @@ body {
   }
 }
 
-@media (max-width: 900px) {
-  .grid {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto;
-  }
-  .center {
-    order: -1; /* the viewer stays on top when everything stacks */
-    height: min(52vh, 460px);
-    min-height: 300px;
-  }
-  .sidebar {
-    max-height: none;
-    overflow: visible;
-  }
-}
+/* The phone/tablet layout lives in responsive.css (loaded last) — the old 900px
+   block was removed there to avoid two conflicting mobile structures. */
 
 /* ---------------- panels ---------------- */
 .panel {

@@ -8,6 +8,7 @@ import FacetOverlay from './FacetOverlay'
 import ShapeOutline from './ShapeOutline'
 import DirectionAxes from './DirectionAxes'
 import ColorLegend from './ColorLegend'
+import { MOBILE_QUERY, MOBILE_STAGE_INSET, useMediaQuery } from '../useMediaQuery'
 import type { RenderData } from '../colors'
 import type { LiteResult, ViewState } from '../types'
 
@@ -88,11 +89,14 @@ function CameraRig({
   cameraMode,
   resetToken,
   onFit,
+  inset,
 }: {
   vertices: ReadonlyArray<[number, number, number]>
   cameraMode: ViewState['cameraMode']
   resetToken: number
   onFit: (distance: number) => void
+  /** permanent overlay inset (px) reserved symmetrically at the top and bottom */
+  inset: number
 }) {
   const camera = useThree((s) => s.camera)
   const controls = useThree((s) => s.controls) as unknown as { target?: THREE.Vector3; update?: () => void } | null
@@ -101,11 +105,22 @@ function CameraRig({
 
   useEffect(() => {
     if (width < 40 || height < 40 || vertices.length < 4) return
+    // Frame the particle inside the UNOBSTRUCTED part of the stage: the compact
+    // toolbar (top) and the HUD (bottom) are permanent overlays, so the same inset
+    // is reserved on both sides and the particle stays centred in what the user can
+    // actually see (and occupancy is measured against that band).
+    // The toolbar and the HUD are horizontal strips: they only consume height, so
+    // the width stays fully usable and the same inset is reserved top and bottom.
+    const effWidth = Math.max(40, width)
+    const effHeight = Math.max(40, height - 2 * inset)
     const dir = new THREE.Vector3(0.62, 0.48, 0.82).normalize() // origin -> camera
     const zAxis = dir.clone() // camera +Z
     const xAxis = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), zAxis).normalize()
     const yAxis = new THREE.Vector3().crossVectors(zAxis, xAxis).normalize()
-    const aspect = width / Math.max(height, 1)
+    const aspect = effWidth / Math.max(effHeight, 1)
+    // fraction of the FULL viewport that equals FILL_TARGET of the visible band
+    const fillY = (FILL_TARGET * effHeight) / height
+    const fillX = (FILL_TARGET * effWidth) / width
 
     let lateralX = 0
     let lateralY = 0
@@ -120,8 +135,8 @@ function CameraRig({
         lateralY = Math.max(lateralY, Math.abs(vec.dot(yAxis)))
       }
       // world half-height = height / (2 * zoom): keep the bbox inside FILL_TARGET
-      needOrthoY = (height * FILL_TARGET) / (2 * Math.max(lateralY, 1e-6))
-      needOrthoX = (width * FILL_TARGET) / (2 * Math.max(lateralX, 1e-6))
+      needOrthoY = (effHeight * FILL_TARGET) / (2 * Math.max(lateralY, 1e-6))
+      needOrthoX = (effWidth * FILL_TARGET) / (2 * Math.max(lateralX, 1e-6))
       const ortho = camera as THREE.OrthographicCamera
       ortho.zoom = Math.min(needOrthoY, needOrthoX)
       ;(camera as THREE.OrthographicCamera).position.copy(dir.clone().multiplyScalar(Math.max(60, height)))
@@ -132,8 +147,8 @@ function CameraRig({
       for (const v of vertices) {
         const vec = new THREE.Vector3(v[0], v[1], v[2])
         const depthOffset = vec.dot(zAxis)
-        const needY = Math.abs(vec.dot(yAxis)) / (FILL_TARGET * tanHalf) + depthOffset
-        const needX = Math.abs(vec.dot(xAxis)) / (FILL_TARGET * tanHalf * aspect) + depthOffset
+        const needY = Math.abs(vec.dot(yAxis)) / (fillY * tanHalf) + depthOffset
+        const needX = Math.abs(vec.dot(xAxis)) / (fillX * tanHalf * aspect) + depthOffset
         distance = Math.max(distance, needY, needX)
       }
       distance = Math.max(distance, 1e-3)
@@ -149,7 +164,7 @@ function CameraRig({
     }
     // remember the fitted framing so "Reset view" can return to exactly this pose
     ;(controls as { saveState?: () => void } | null)?.saveState?.()
-  }, [camera, controls, vertices, cameraMode, resetToken, width, height, onFit])
+  }, [camera, controls, vertices, cameraMode, resetToken, width, height, inset, onFit])
 
   return null
 }
@@ -168,6 +183,14 @@ export default function Viewer({
   const [resetToken, setResetToken] = useState(0)
   const [fitDistance, setFitDistance] = useState(0)
   const fullscreen = useFullscreen(wrapperRef)
+  const isMobile = useMediaQuery(MOBILE_QUERY)
+  // Mobile: the settings panel and the CN legend are collapsible and live BELOW the
+  // stage in normal mode, so nothing permanent is drawn over the particle.
+  const [showSettings, setShowSettings] = useState(false)
+  const [showLegend, setShowLegend] = useState(false)
+  // in fullscreen there is no room below the stage: the same panels float instead,
+  // and they are dismissible
+  const panelsFloat = isMobile && fullscreen.isFullscreen
 
   const size = result ? result.shape.maxExtentA : 40
   const segments = view.quality === 'low' ? 8 : view.quality === 'medium' ? 14 : renderData.counts.total > 8000 ? 12 : 20
@@ -199,7 +222,8 @@ export default function Viewer({
   }
 
   return (
-    <div className="viewer" ref={wrapperRef}>
+    <>
+      <div className="viewer" ref={wrapperRef}>
       <Canvas
         flat
         dpr={[1, 2]}
@@ -222,6 +246,7 @@ export default function Viewer({
           cameraMode={view.cameraMode}
           resetToken={resetToken}
           onFit={onFit}
+          inset={isMobile ? MOBILE_STAGE_INSET : 0}
         />
 
         {result && renderData.visibleCount > 0 && (
@@ -250,7 +275,64 @@ export default function Viewer({
         <DebugBridge radius={size / 2} />
       </Canvas>
 
-      <div className="viewer-toolbar">
+      <div className={isMobile ? 'viewer-toolbar compact' : 'viewer-toolbar'}>
+        {isMobile ? (
+          <div className="toolbar-group compact-bar">
+            <button
+              className="chip icon-btn"
+              onClick={() => setResetToken((token) => token + 1)}
+              title="Reset the camera"
+              aria-label="Reset view"
+            >
+              ⟲ <span className="icon-label">Reset</span>
+            </button>
+            <button
+              className={fullscreen.isFullscreen ? 'chip icon-btn active' : 'chip icon-btn'}
+              onClick={() => {
+                void fullscreen.toggle()
+              }}
+              title={
+                fullscreen.supported
+                  ? 'Fill the whole screen with the viewer (Esc leaves fullscreen)'
+                  : 'Fullscreen is not available in this browser'
+              }
+              aria-label={fullscreen.isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+              data-testid="fullscreen-toggle"
+            >
+              {fullscreen.isFullscreen ? '⤢' : '⛶'}
+            </button>
+            <button
+              className={showLegend ? 'chip icon-btn compact active' : 'chip icon-btn compact'}
+              onClick={() => setShowLegend((value) => !value)}
+              aria-expanded={showLegend}
+              aria-controls="mobile-cn-legend"
+              title="Coordination-number legend (opens below the viewer)"
+            >
+              CN
+            </button>
+            <button
+              className={view.cameraMode === 'orthographic' ? 'chip icon-btn compact active' : 'chip icon-btn compact'}
+              onClick={() =>
+                onView({ cameraMode: view.cameraMode === 'orthographic' ? 'perspective' : 'orthographic' })
+              }
+              title="Toggle perspective / orthographic projection"
+              aria-label={view.cameraMode === 'orthographic' ? 'Switch to perspective' : 'Switch to orthographic'}
+            >
+              {view.cameraMode === 'orthographic' ? 'Orth' : 'Persp'}
+            </button>
+            <button
+              className={showSettings ? 'chip icon-btn active' : 'chip icon-btn'}
+              onClick={() => setShowSettings((value) => !value)}
+              aria-expanded={showSettings}
+              aria-controls="mobile-viewer-settings"
+              title="Viewer settings: facet planes, directions, wireframe, quality, screenshot"
+              aria-label="Viewer settings"
+            >
+              ⚙
+            </button>
+          </div>
+        ) : (
+          <>
         <div className="toolbar-group">
           <button
             className={view.cameraMode === 'perspective' ? 'chip active' : 'chip'}
@@ -327,19 +409,27 @@ export default function Viewer({
               {quality}
             </button>
           ))}
-        </div>
+          </div>
+          </>
+        )}
       </div>
 
       {result && (
-        <div className="viewer-hud">
-          <span>
-            <b>{renderData.counts.rendered.toLocaleString()}</b> / {renderData.counts.total.toLocaleString()} atoms drawn
-            {renderData.counts.hidden > 0 ? ` (${renderData.counts.hidden.toLocaleString()} hidden)` : ''}
-          </span>
-          <span>sphere radius {sphereRadius.toFixed(2)} Å (visual only)</span>
-          <span>
-            computed locally in {result.computeMs.toFixed(1)} ms
-          </span>
+        <div className={isMobile ? 'viewer-hud compact' : 'viewer-hud'}>
+          {isMobile ? (
+            <span>
+              <b>{renderData.counts.rendered.toLocaleString()}</b> atoms · {result.computeMs.toFixed(1)} ms
+            </span>
+          ) : (
+            <>
+              <span>
+                <b>{renderData.counts.rendered.toLocaleString()}</b> / {renderData.counts.total.toLocaleString()} atoms drawn
+                {renderData.counts.hidden > 0 ? ` (${renderData.counts.hidden.toLocaleString()} hidden)` : ''}
+              </span>
+              <span>sphere radius {sphereRadius.toFixed(2)} Å (visual only)</span>
+              <span>computed locally in {result.computeMs.toFixed(1)} ms</span>
+            </>
+          )}
         </div>
       )}
 
@@ -352,7 +442,92 @@ export default function Viewer({
         </div>
       )}
       {computing && <div className="computing">computing…</div>}
-      <ColorLegend view={view} result={result} />
-    </div>
+      {/* Desktop keeps the in-canvas legend; mobile never draws a panel over the model. */}
+      {!isMobile && <ColorLegend view={view} result={result} />}
+      </div>
+
+      {isMobile && (showSettings || showLegend) && (
+        <div
+          className={panelsFloat ? 'viewer-side-panel float' : 'viewer-side-panel'}
+          data-testid="mobile-panels"
+        >
+          {showLegend && (
+            <section id="mobile-cn-legend" className="side-panel-section" aria-label="Coordination-number legend">
+              <div className="side-panel-head">
+                <span>CN Legend · 배위수 범례</span>
+                <button className="chip tiny" onClick={() => setShowLegend(false)} aria-label="Close the legend">
+                  ✕
+                </button>
+              </div>
+              <ColorLegend view={view} result={result} />
+            </section>
+          )}
+          {showSettings && (
+            <section id="mobile-viewer-settings" className="side-panel-section" aria-label="Viewer settings">
+              <div className="side-panel-head">
+                <span>Viewer settings · 뷰어 설정</span>
+                <button className="chip tiny" onClick={() => setShowSettings(false)} aria-label="Close the settings">
+                  ✕
+                </button>
+              </div>
+              <div className="settings-row">
+                <span className="settings-label">Projection</span>
+                <button
+                  className={view.cameraMode === 'perspective' ? 'chip touch active' : 'chip touch'}
+                  onClick={() => onView({ cameraMode: 'perspective' })}
+                >
+                  Perspective
+                </button>
+                <button
+                  className={view.cameraMode === 'orthographic' ? 'chip touch active' : 'chip touch'}
+                  onClick={() => onView({ cameraMode: 'orthographic' })}
+                >
+                  Orthographic
+                </button>
+              </div>
+              <div className="settings-row">
+                <span className="settings-label">Overlays</span>
+                <button
+                  className={view.showFacetPlanes ? 'chip touch active' : 'chip touch'}
+                  onClick={() => onView({ showFacetPlanes: !view.showFacetPlanes })}
+                >
+                  Facet planes
+                </button>
+                <button
+                  className={view.showDirections ? 'chip touch active' : 'chip touch'}
+                  onClick={() => onView({ showDirections: !view.showDirections })}
+                >
+                  Directions
+                </button>
+                <button
+                  className={view.showWireframe ? 'chip touch active' : 'chip touch'}
+                  onClick={() => onView({ showWireframe: !view.showWireframe })}
+                >
+                  Wireframe
+                </button>
+              </div>
+              <div className="settings-row">
+                <span className="settings-label">Quality</span>
+                {(['low', 'medium', 'high'] as const).map((quality) => (
+                  <button
+                    key={quality}
+                    className={view.quality === quality ? 'chip touch active' : 'chip touch'}
+                    onClick={() => onView({ quality })}
+                  >
+                    {quality}
+                  </button>
+                ))}
+              </div>
+              <div className="settings-row">
+                <span className="settings-label">Export</span>
+                <button className="chip touch" onClick={downloadPng}>
+                  Screenshot PNG
+                </button>
+              </div>
+            </section>
+          )}
+        </div>
+      )}
+    </>
   )
 }

@@ -54,6 +54,7 @@ class Session:
         self.next_id = 0
         self.requests: list[str] = []
         self.external: list[str] = []
+        self.own_host = ""  # host of the document itself (same-origin is not "external")
         self.problems: list[str] = []
 
     async def cmd(self, method: str, params: dict | None = None) -> dict:
@@ -69,8 +70,10 @@ class Session:
             if method_name == "Network.requestWillBeSent":
                 url = message["params"]["request"]["url"]
                 self.requests.append(url)
+                if message["params"].get("type") == "Document" and not self.own_host and "://" in url:
+                    self.own_host = url.split("/")[2]
                 host = url.split("/")[2] if "://" in url else ""
-                if host and not host.startswith("127.0.0.1") and not host.startswith("localhost"):
+                if host and self.own_host and host != self.own_host:
                     self.external.append(url)
             elif method_name == "Runtime.exceptionThrown":
                 self.problems.append(str(message["params"].get("exceptionDetails", {}).get("text"))[:160])

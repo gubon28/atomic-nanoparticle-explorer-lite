@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react'
+import { useFullscreen } from '../useFullscreen'
 import { Canvas, useThree } from '@react-three/fiber'
 import { OrbitControls, OrthographicCamera, PerspectiveCamera } from '@react-three/drei'
 import * as THREE from 'three'
@@ -166,6 +167,7 @@ export default function Viewer({
   const controlsRef = useRef<unknown>(null)
   const [resetToken, setResetToken] = useState(0)
   const [fitDistance, setFitDistance] = useState(0)
+  const fullscreen = useFullscreen(wrapperRef)
 
   const size = result ? result.shape.maxExtentA : 40
   const segments = view.quality === 'low' ? 8 : view.quality === 'medium' ? 14 : renderData.counts.total > 8000 ? 12 : 20
@@ -276,6 +278,20 @@ export default function Viewer({
           <button className="chip" onClick={downloadPng} title="Save the current view as PNG">
             Screenshot PNG
           </button>
+          <button
+            className={fullscreen.isFullscreen ? 'chip active' : 'chip'}
+            onClick={() => {
+              void fullscreen.toggle()
+            }}
+            title={
+              fullscreen.supported
+                ? 'Fill the whole screen with the viewer (Esc leaves fullscreen)'
+                : 'Fullscreen is not available in this browser'
+            }
+            data-testid="fullscreen-toggle"
+          >
+            {fullscreen.isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+          </button>
         </div>
         <div className="toolbar-group">
           <button
@@ -327,6 +343,14 @@ export default function Viewer({
         </div>
       )}
 
+      {fullscreen.isFullscreen && (
+        <div className="viewer-hint">Esc 또는 Exit fullscreen 버튼으로 나가기</div>
+      )}
+      {fullscreen.message && (
+        <div className="viewer-message" role="status" onClick={fullscreen.dismiss} title="Dismiss">
+          {fullscreen.message}
+        </div>
+      )}
       {computing && <div className="computing">computing…</div>}
       <ColorLegend view={view} result={result} />
     </div>

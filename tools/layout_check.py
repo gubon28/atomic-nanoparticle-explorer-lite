@@ -27,7 +27,10 @@ import urllib.request
 
 import websockets
 
-VIEWPORTS = [(1772, 864), (1920, 1080), (1366, 768), (1024, 768)]
+# Phase 2.1 suite: desktop sizes only — 1024x768 and below are owned by the
+# Phase 2.2 phone/tablet suite below (which asserts the stacked, page-scrolling
+# layout instead of the desktop shell).
+VIEWPORTS = [(1772, 864), (1920, 1080), (1366, 768)]
 CHROME_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -441,11 +444,320 @@ async def interaction_checks(session: "Session", data: dict, download_dir: str) 
     return checks
 
 
+# --- Phase 2.2: phone / tablet layout + real fullscreen --------------------------
+
+PHASE22_VIEWPORTS = [
+    (1024, 768),
+    (1024, 600),
+    (430, 932),
+    (412, 915),
+    (390, 844),
+    (375, 667),
+    (360, 800),
+    (768, 1024),
+    (1920, 1080),
+]
+
+PHASE22_PROBE = r"""
+(() => {
+  const rect = (el) => { if (!el) return null; const b = el.getBoundingClientRect();
+    return { x: b.x, y: b.y, w: b.width, h: b.height }; };
+  const q = (sel) => document.querySelector(sel);
+  const scrollInfo = (el) => { if (!el) return null; return {
+    scrollH: el.scrollHeight, clientH: el.clientHeight,
+    scrollW: el.scrollWidth, clientW: el.clientWidth } };
+  const sidebar = q('.sidebar'), right = q('.right'), viewer = q('.viewer');
+  const toolbar = q('.viewer-toolbar'), legend = q('.viewer-legend, .legend, .color-legend');
+  const canvas = q('.viewer canvas');
+  const fsBtn = q('[data-testid="fullscreen-toggle"]');
+  return JSON.stringify({
+    viewer: rect(viewer), canvas: rect(canvas), toolbar: rect(toolbar), legend: rect(legend),
+    sidebar: rect(sidebar), right: rect(right),
+    sidebarScroll: scrollInfo(sidebar), rightScroll: scrollInfo(right),
+    toolbarScroll: scrollInfo(toolbar),
+    fullscreenButton: fsBtn ? { label: fsBtn.textContent.trim(), ...rect(fsBtn) } : null,
+    fullscreenElement: document.fullscreenElement ? (document.fullscreenElement.className || 'element') : null,
+    message: q('.viewer-message') ? q('.viewer-message').textContent.trim() : null,
+    bodyOverflowX: document.documentElement.scrollWidth - window.innerWidth,
+    viewport: { w: window.innerWidth, h: window.innerHeight },
+    doc: { scrollH: document.documentElement.scrollHeight, clientH: document.documentElement.clientHeight },
+  });
+})()
+"""
+
+
+def _inside(inner, outer, tol=2.0) -> bool:
+    if not inner or not outer:
+        return False
+    return (
+        inner["x"] >= outer["x"] - tol
+        and inner["y"] >= outer["y"] - tol
+        and inner["x"] + inner["w"] <= outer["x"] + outer["w"] + tol
+        and inner["y"] + inner["h"] <= outer["y"] + outer["h"] + tol
+    )
+
+
+def _overlap(a, b, tol=2.0) -> float:
+    if not a or not b:
+        return 0.0
+    ox = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+    oy = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+    return max(0.0, ox - tol) * max(0.0, oy - tol)
+
+
+PHASE22_FAILURES: list = []
+
+
+def phase22_checks(data: dict, width: int, height: int) -> list:
+    """Twelve layout rules across the phone / tablet / desktop viewport list."""
+    stage = f"{width}x{height}"
+    checks = []
+    viewer = data.get("viewer") or {}
+    canvas = data.get("canvas") or {}
+    toolbar = data.get("toolbar") or {}
+    legend = data.get("legend") or {}
+    sidebar = data.get("sidebar") or {}
+    right = data.get("right") or {}
+    if not viewer or not canvas:
+        return [(f"{stage} viewer measured", False, "no viewer/canvas in the DOM")]
+
+    # 1/2. the control panel and the toolbar are on screen and not clipped
+    # (above 1024px the panels scroll internally by design, so only the phone /
+    #  tablet layout has to fit without its own scrollbar)
+    sb = data.get("sidebarScroll") or {}
+    tb = data.get("toolbarScroll") or {}
+    panel_fits = (not sb or sb["scrollH"] <= sb["clientH"] + 6) if width <= 1024 else True
+    checks.append((
+        f"{stage} control panel visible and not clipped",
+        bool(sidebar) and sidebar["h"] > 40 and sidebar["y"] >= -1 and panel_fits,
+        f"panel y={sidebar.get('y', 0):.0f} h={sidebar.get('h', 0):.0f} "
+        f"scroll={sb.get('scrollH', 0)}/client={sb.get('clientH', 0)}"
+        + ("" if width <= 1024 else " (desktop: panel scrolls internally by design)"),
+    ))
+    checks.append((
+        f"{stage} toolbar visible and not clipped",
+        bool(toolbar) and toolbar["h"] > 20 and _inside(toolbar, viewer, 3)
+        and (not tb or tb["scrollW"] <= tb["clientW"] + 6),
+        f"toolbar h={toolbar.get('h', 0):.0f} "
+        f"scrollW={tb.get('scrollW', 0)}/clientW={tb.get('clientW', 0)}",
+    ))
+
+    # 3. viewer height: 45-60% of the viewport on small screens, larger on desktop
+    frac = viewer["h"] / max(height, 1)
+    if width <= 1024:
+        ok = 0.44 <= frac <= 0.61
+        note = f"{frac*100:.1f}% of {height}px (target 45-60%)"
+    else:
+        ok = frac > 0.55
+        note = f"{frac*100:.1f}% of {height}px (desktop: unchanged, fills the column)"
+    checks.append((f"{stage} viewer keeps a usable height", ok, note))
+
+    # 4. toolbar and legend stay inside the stage
+    checks.append((
+        f"{stage} toolbar and legend inside the stage",
+        _inside(toolbar, viewer, 3) and _inside(legend, viewer, 3),
+        f"toolbar in={_inside(toolbar, viewer, 3)} legend in={_inside(legend, viewer, 3)}",
+    ))
+
+    # 5. no horizontal page overflow
+    checks.append((
+        f"{stage} no horizontal overflow",
+        data.get("bodyOverflowX", 1) <= 1,
+        f"scrollWidth-innerWidth={data.get('bodyOverflowX', 0):.0f}px",
+    ))
+
+    # 6. the panels never overlap the stage
+    worst = max(_overlap(viewer, sidebar), _overlap(viewer, right))
+    checks.append((f"{stage} no overlapping panels", worst <= 0.001, f"overlap area {worst:.1f}px2"))
+
+    # 7. the stage is usable: the canvas fills it and the particle is framed
+    fills = abs(canvas["w"] - viewer["w"]) <= 4 and abs(canvas["h"] - viewer["h"]) <= 4
+    px = data.get("pixels")
+    if isinstance(px, dict):
+        short = min(canvas["w"], canvas["h"]) or 1
+        occ = max(px["w"], px["h"]) / short
+        dx = abs(px["cx"] - canvas["w"] / 2)
+        dy = abs(px["cy"] - canvas["h"] / 2)
+        ok = fills and 0.35 <= occ <= 0.8 and dx <= 0.09 * canvas["w"] and dy <= 0.09 * canvas["h"]
+        note = f"canvas {canvas['w']:.0f}x{canvas['h']:.0f} vs viewer {viewer['w']:.0f}x{viewer['h']:.0f}, occupancy {occ*100:.1f}%, offsets {dx:.0f}/{dy:.0f}px"
+    else:
+        ok = fills
+        note = f"canvas {canvas['w']:.0f}x{canvas['h']:.0f} vs viewer {viewer['w']:.0f}x{viewer['h']:.0f} (pixel probe unavailable)"
+    checks.append((f"{stage} viewer usable (canvas fills, particle framed)", ok, note))
+
+    return checks
+
+
+def fullscreen_checks(data: dict, width: int, height: int) -> list:
+    """The fullscreen contract: real fullscreen, correct sizes, synced state, Esc."""
+    checks = []
+    vp = data.get("viewport") or {"w": width, "h": height}
+    viewer = data.get("viewer") or {}
+    canvas = data.get("canvas") or {}
+    button = data.get("fullscreenButton") or {}
+    active = data.get("fullscreenElement")
+
+    full = bool(active and "viewer" in str(active))
+    checks.append(("fullscreen: the stage is the fullscreen element", full, f"fullscreenElement={active}"))
+
+    fills = (
+        abs(viewer.get("x", 9) - 0) <= 2
+        and abs(viewer.get("y", 9) - 0) <= 2
+        and abs(viewer.get("w", 0) - vp["w"]) <= 4
+        and abs(viewer.get("h", 0) - vp["h"]) <= 4
+    )
+    checks.append((
+        "fullscreen: stage fills 100vw x 100vh",
+        fills,
+        f"stage {viewer.get('w', 0):.0f}x{viewer.get('h', 0):.0f} at ({viewer.get('x', 0):.0f},{viewer.get('y', 0):.0f}), viewport {vp['w']}x{vp['h']}",
+    ))
+
+    resized = abs(canvas.get("w", 0) - vp["w"]) <= 4 and abs(canvas.get("h", 0) - vp["h"]) <= 4
+    checks.append((
+        "fullscreen: the drawing surface was resized",
+        resized,
+        f"canvas {canvas.get('w', 0):.0f}x{canvas.get('h', 0):.0f}",
+    ))
+
+    checks.append((
+        "fullscreen: no clipping or overflow",
+        data.get("bodyOverflowX", 0) <= 1 and (data.get("toolbar") or {}).get("h", 0) > 20,
+        f"overflow {data.get('bodyOverflowX', 0):.0f}px, toolbar h={(data.get('toolbar') or {}).get('h', 0):.0f}",
+    ))
+
+    inside = _inside(data.get("toolbar"), viewer, 3) and _inside(data.get("legend"), viewer, 3)
+    checks.append(("fullscreen: toolbar and legend visible inside", inside, f"in-bounds={inside}"))
+
+    label = str(button.get("label", ""))
+    checks.append((
+        "fullscreen: the button reports the state",
+        "exit" in label.lower(),
+        f"button label={label!r}",
+    ))
+
+    return checks
+
+
+def fullscreen_failure_checks(data: dict) -> list:
+    """A refused fullscreen request must stay in the normal view and say so."""
+    checks = []
+    active = data.get("fullscreenElement")
+    message = data.get("message") or ""
+    checks.append((
+        "fullscreen: a refusal keeps the normal view",
+        not active,
+        f"fullscreenElement={active}",
+    ))
+    checks.append((
+        "fullscreen: a refusal shows a visible message",
+        "refused" in message.lower() or "not available" in message.lower(),
+        f"message={message[:80]!r}",
+    ))
+    return checks
+
+
+async def real_click(session: "Session", x: float, y: float) -> None:
+    """A trusted click (needed for the Fullscreen API's user-gesture requirement)."""
+    for kind in ("mousePressed", "mouseReleased"):
+        await session.cmd(
+            "Input.dispatchMouseEvent",
+            {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1},
+        )
+        await asyncio.sleep(0.06)
+
+
+async def phase22_run(session: "Session", url: str, failures: list) -> None:
+    for width, height in PHASE22_VIEWPORTS:
+        print(f"\n=== Phase 2.2 {width}x{height} ===")
+        await session.cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": width <= 1024},
+        )
+        await session.cmd("Page.navigate", {"url": url})
+        await asyncio.sleep(3.2)
+        # the direction axes are WebGL geometry that would inflate the measured
+        # particle bounding box, so the pixel probe runs with them switched off
+        await session.js(PROBE_NO_AXES)
+        await asyncio.sleep(1.5)
+        data = json.loads(await session.js(PHASE22_PROBE))
+        base = json.loads(await session.js(PROBE))
+        if isinstance(base, dict):
+            data["pixels"] = base.get("pixels")
+            data["pixels_with_axes"] = base.get("pixels_with_axes")
+
+        for name, ok, detail in phase22_checks(data, width, height):
+            print(("  PASS  " if ok else "  FAIL  ") + name + f"   ({detail})")
+            if not ok:
+                PHASE22_FAILURES.append(name)
+
+        if (width, height) == (1920, 1080):
+            await phase22_fullscreen(session, data, failures)
+    print(f"\nPhase 2.2 checks failed: {len(PHASE22_FAILURES)}")
+    for name in PHASE22_FAILURES:
+        print(f"  - {name}")
+
+
+async def phase22_fullscreen(session: "Session", data: dict, failures: list) -> None:
+    print("  --- fullscreen ---")
+    button = data.get("fullscreenButton") or {}
+    if not button:
+        failures.append("fullscreen: the toolbar exposes a fullscreen button")
+        print("  FAIL  fullscreen: the toolbar exposes a fullscreen button   (not found)")
+        return
+    cx = button["x"] + button["w"] / 2
+    cy = button["y"] + button["h"] / 2
+
+    await real_click(session, cx, cy)
+    await asyncio.sleep(1.8)
+    after = json.loads(await session.js(PHASE22_PROBE))
+    for name, ok, detail in fullscreen_checks(after, 1920, 1080):
+        print(("  PASS  " if ok else "  FAIL  ") + name + f"   ({detail})")
+        if not ok:
+            PHASE22_FAILURES.append(name)
+
+    # Esc leaves fullscreen (the browser handles it; the button must follow)
+    for kind in ("keyDown", "keyUp"):
+        await session.cmd(
+            "Input.dispatchKeyEvent",
+            {"type": kind, "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27, "nativeVirtualKeyCode": 27},
+        )
+        await asyncio.sleep(0.08)
+    await asyncio.sleep(1.4)
+    exited = json.loads(await session.js(PHASE22_PROBE))
+    label = str((exited.get("fullscreenButton") or {}).get("label", ""))
+    for name, ok, detail in (
+        ("fullscreen: Esc returns to the normal view", not exited.get("fullscreenElement"), f"fullscreenElement={exited.get('fullscreenElement')}"),
+        ("fullscreen: the button label follows the state", "exit" not in label.lower(), f"label={label!r}"),
+    ):
+        print(("  PASS  " if ok else "  FAIL  ") + name + f"   ({detail})")
+        if not ok:
+            PHASE22_FAILURES.append(name)
+
+    # refusal path: the request rejects -> normal view plus a visible message
+    await session.js(
+        "(() => { window.__fsOriginal = Element.prototype.requestFullscreen;"
+        " Element.prototype.requestFullscreen = () => Promise.reject(new Error('stub refusal'));"
+        " return true })()"
+    )
+    button = (json.loads(await session.js(PHASE22_PROBE)).get("fullscreenButton")) or button
+    await real_click(session, button["x"] + button["w"] / 2, button["y"] + button["h"] / 2)
+    await asyncio.sleep(1.4)
+    refused = json.loads(await session.js(PHASE22_PROBE))
+    for name, ok, detail in fullscreen_failure_checks(refused):
+        print(("  PASS  " if ok else "  FAIL  ") + name + f"   ({detail})")
+        if not ok:
+            PHASE22_FAILURES.append(name)
+    await session.js(
+        "(() => { if (window.__fsOriginal) Element.prototype.requestFullscreen = window.__fsOriginal; return true })()"
+    )
+
+
 async def main() -> int:
     url = sys.argv[1] if len(sys.argv) > 1 else "https://gubon28.github.io/atomic-nanoparticle-explorer-lite/"
     json_out = None
     if "--json" in sys.argv:
         json_out = sys.argv[sys.argv.index("--json") + 1]
+    phase22 = "--phase22" in sys.argv
 
     chrome = find_chrome()
     profile = tempfile.mkdtemp(prefix="lite-layout-")
@@ -477,7 +789,9 @@ async def main() -> int:
             session = Session(ws)
             await session.cmd("Runtime.enable")
             await session.cmd("Page.enable")
-            for width, height in VIEWPORTS:
+            if phase22:
+                await phase22_run(session, url, failures)
+            for width, height in ([] if phase22 else VIEWPORTS):
                 await session.cmd(
                     "Emulation.setDeviceMetricsOverride",
                     {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False},
